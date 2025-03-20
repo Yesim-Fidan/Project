@@ -1,0 +1,67 @@
+#!/bin/bash
+
+#SBATCH --job-name=RNA_seq
+#SBATCH --output=RNA_seq_%j.out
+#SBATCH --error=RNA_seq_%j.err
+#SBATCH --time=12:00:00
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=500G
+#SBATCH --partition=largemem
+#SBATCH --account=bisgin0
+
+# Preparation
+# mkdir -p fastq  # locate fastq.gz files here
+
+module load Bioinformatics
+module load  star/2.7.11a-hdp2onj
+module load multiqc/1.22.2
+module load samtools/1.13-fwwss5n
+module load subread/2.0.3
+module save 
+
+#Step 1: Create directories in WSL
+
+mkdir -p ref 
+mkdir -p aligned_data
+mkdir -p fastqc_results
+mkdir -p star_index
+mkdir -p alignment_qc
+mkdir -p counts
+
+# Step 2: Download reference genome and annotation files
+# Soft mask
+wget -P ref https://ftp.ensembl.org/pub/release-112/fasta/homo_sapiens/dna/Homo_sapiens.GRCh38.dna_sm.primary_assembly.fa.gz
+
+# Annotation
+wget -P ref https://ftp.ensembl.org/pub/release-112/gtf/homo_sapiens/Homo_sapiens.GRCh38.112.gtf.gz
+
+# Unzip the downloaded files
+gunzip ref/Homo_sapiens.GRCh38.dna_sm.primary_assembly.fa.gz
+gunzip ref/Homo_sapiens.GRCh38.112.gtf.gz
+
+# Step 3: FastQC Analysis
+fastq_dir="fastq"
+fastqc_output="fastqc_results"
+
+fastqc -t 8 -o $fastqc_output $fastq_dir/*.fastq.gz
+
+multiqc $fastqc_output -o $fastqc_output
+
+# Step 4: Generate Genome Index by STAR
+STAR --runMode genomeGenerate --genomeDir star_index --genomeFastaFiles ref/Homo_sapiens.GRCh38.dna_sm.primary_assembly.fa --sjdbGTFfile ref/Homo_sapiens.GRCh38.112.gtf --runThreadN 16
+
+# Step 5: Alignment with STAR
+for sample in $(ls fastq/*_R1_001.fastq.gz | sed 's/_R1_001.fastq.gz//' | sed 's/fastq\///'); do
+    echo "Processing sample: $sample"
+    STAR --runThreadN 16 --genomeDir star_index --readFilesIn fastq/${sample}_R1_001.fastq.gz fastq/${sample}_R2_001.fastq.gz --readFilesCommand zcat --outFileNamePrefix aligned_data/${sample}_ --outSAMtype BAM SortedByCoordinate
+done
+
+# Step 6: Quality Control of Alignment
+for bam_file in aligned_data/*.bam; do
+    samtools flagstat $bam_file > alignment_qc/$(basename $bam_file .bam)_flagstat.txt
+done
+
+# Step 7: Generating the count table
+
+featureCounts -T 16 -p --countReadPairs -a ref/Homo_sapiens.GRCh38.112.gtf -o counts/gene_counts.txt aligned_data/*.bam
+
